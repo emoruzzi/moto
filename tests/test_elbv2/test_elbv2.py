@@ -16,7 +16,7 @@ def test_create_load_balancer():
     response, _, security_group, subnet1, subnet2, conn = create_load_balancer()
 
     lb = response["LoadBalancers"][0]
-    assert lb["CanonicalHostedZoneId"].startswith("Z")
+    assert lb["CanonicalHostedZoneId"] == "Z35SXDOTRQ7X7K"
     assert lb["DNSName"] == "my-lb-1.us-east-1.elb.amazonaws.com"
     assert lb["LoadBalancerArn"].startswith(
         f"arn:aws:elasticloadbalancing:us-east-1:{ACCOUNT_ID}:loadbalancer/app/my-lb/"
@@ -105,7 +105,7 @@ def test_describe_load_balancers():
 
     assert len(response["LoadBalancers"]) == 1
     lb = response["LoadBalancers"][0]
-    assert lb["CanonicalHostedZoneId"].startswith("Z")
+    assert lb["CanonicalHostedZoneId"] == "Z35SXDOTRQ7X7K"
     assert lb["LoadBalancerName"] == "my-lb"
     assert lb["State"]["Code"] == "active"
 
@@ -119,6 +119,28 @@ def test_describe_load_balancers():
         conn.describe_load_balancers(LoadBalancerArns=["not-a/real/arn"])
     with pytest.raises(ClientError):
         conn.describe_load_balancers(Names=["nope"])
+
+
+@mock_aws
+def test_canonical_hosted_zone_id_per_type():
+    region = "eu-west-1"
+    conn = boto3.client("elbv2", region_name=region)
+    ec2 = boto3.resource("ec2", region_name=region)
+
+    vpc = ec2.create_vpc(CidrBlock="172.28.7.0/24", InstanceTenancy="default")
+    subnet = ec2.create_subnet(
+        VpcId=vpc.id, CidrBlock="172.28.7.0/26", AvailabilityZone=region + "a"
+    )
+
+    alb = conn.create_load_balancer(
+        Name="my-alb", Subnets=[subnet.id], Type="application"
+    )["LoadBalancers"][0]
+    nlb = conn.create_load_balancer(Name="my-nlb", Subnets=[subnet.id], Type="network")[
+        "LoadBalancers"
+    ][0]
+
+    assert alb["CanonicalHostedZoneId"] == "Z32O12XQLNTSW2"
+    assert nlb["CanonicalHostedZoneId"] == "Z2IFOLAFXWLO4F"
 
 
 @mock_aws
@@ -2270,3 +2292,25 @@ def test_describe_capacity_reservation():
     resp = conn.describe_capacity_reservation(LoadBalancerArn=load_balancer_arn)
     for crs in resp["CapacityReservationState"]:
         assert crs["State"]["Code"] == "provisioned"
+
+
+@mock_aws
+def test_create_load_balancer_without_scheme_defaults_to_internet_facing():
+    conn = boto3.client("elbv2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+
+    vpc = ec2.create_vpc(CidrBlock="172.28.7.0/24", InstanceTenancy="default")
+    subnet1 = ec2.create_subnet(
+        VpcId=vpc.id, CidrBlock="172.28.7.0/26", AvailabilityZone="us-east-1a"
+    )
+    subnet2 = ec2.create_subnet(
+        VpcId=vpc.id, CidrBlock="172.28.7.192/26", AvailabilityZone="us-east-1b"
+    )
+
+    created = conn.create_load_balancer(
+        Name="my-lb", Subnets=[subnet1.id, subnet2.id]
+    )["LoadBalancers"][0]
+    assert created["Scheme"] == "internet-facing"
+
+    described = conn.describe_load_balancers(Names=["my-lb"])["LoadBalancers"][0]
+    assert described["Scheme"] == "internet-facing"

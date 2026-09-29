@@ -24,6 +24,7 @@ from .exceptions import (
     PolicyNotFoundError,
     TooManyTagsError,
 )
+from .hosted_zone_ids import get_hosted_zone_id
 from .policies import (
     AppCookieStickinessPolicy,
     LbCookieStickinessPolicy,
@@ -85,6 +86,7 @@ class LoadBalancer(CloudFormationModel):
     def __init__(
         self,
         account_id: str,
+        region_name: str,
         name: str,
         zones: list[str],
         ports: list[dict[str, Any]],
@@ -94,6 +96,7 @@ class LoadBalancer(CloudFormationModel):
         security_groups: list[str] | None,
     ):
         self.account_id = account_id
+        self.region_name = region_name
         self.name = name
         self.health_check: FakeHealthCheck | None = None
         self.instance_sparse_ids: list[str] = []
@@ -109,7 +112,7 @@ class LoadBalancer(CloudFormationModel):
         self.subnets = subnets or []
         self.vpc_id = vpc_id
         self.tags: dict[str, str] = {}
-        self.dns_name = f"{name}.us-east-1.elb.amazonaws.com"
+        self.dns_name = f"{name}.{region_name}.elb.amazonaws.com"
 
         for port in ports:
             listener = FakeListener(
@@ -146,6 +149,10 @@ class LoadBalancer(CloudFormationModel):
     @property
     def canonical_hosted_zone_name(self) -> str:
         return self.dns_name
+
+    @property
+    def canonical_hosted_zone_name_id(self) -> str:
+        return get_hosted_zone_id(self.region_name, "classic")
 
     @property
     def listener_descriptions(self) -> list[dict[str, Any]]:
@@ -346,6 +353,7 @@ class ELBBackend(BaseBackend, TaggableResourcesMixin):
         if subnets:
             subnet = ec2_backend.get_subnet(subnets[0])
             vpc_id = subnet.vpc_id
+            zones = self._zones_for_subnets(subnets)
         elif zones:
             default_subnets = ec2_backend.get_default_subnets()
             subnets = [default_subnets[zone].id for zone in zones]
@@ -367,6 +375,7 @@ class ELBBackend(BaseBackend, TaggableResourcesMixin):
                 raise InvalidSecurityGroupError()
         new_load_balancer = LoadBalancer(
             account_id=self.account_id,
+            region_name=self.region_name,
             name=name,
             zones=zones,
             ports=ports,
@@ -700,11 +709,20 @@ class ELBBackend(BaseBackend, TaggableResourcesMixin):
         )
         return load_balancer.availability_zones
 
+    def _zones_for_subnets(self, subnets: list[str]) -> list[str]:
+        ec2_backend = ec2_backends[self.account_id][self.region_name]
+        return sorted(
+            {ec2_backend.get_subnet(subnet).availability_zone for subnet in subnets}
+        )
+
     def attach_load_balancer_to_subnets(
         self, load_balancer_name: str, subnets: list[str]
     ) -> list[str]:
         load_balancer = self.get_load_balancer(load_balancer_name)
         load_balancer.subnets = list(set(load_balancer.subnets + subnets))
+        load_balancer.availability_zones = self._zones_for_subnets(
+            load_balancer.subnets
+        )
         return load_balancer.subnets
 
     def detach_load_balancer_from_subnets(
@@ -712,6 +730,9 @@ class ELBBackend(BaseBackend, TaggableResourcesMixin):
     ) -> list[str]:
         load_balancer = self.get_load_balancer(load_balancer_name)
         load_balancer.subnets = [s for s in load_balancer.subnets if s not in subnets]
+        load_balancer.availability_zones = self._zones_for_subnets(
+            load_balancer.subnets
+        )
         return load_balancer.subnets
 
     # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
